@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Douyin DL (test)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 640px; margin-inline: auto; }
+    textarea { width: 100%; box-sizing: border-box; min-height: 90px; font-size: 16px; padding: 8px; }
+    .row { display: flex; gap: 8px; margin: 8px 0; }
+    button { flex: 1; padding: 12px; font-size: 16px; }
+    pre { background: #f3f3f3; padding: 8px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    a.dl { display: block; padding: 12px; background: #111; color: #fff; text-align: center; text-decoration: none; border-radius: 6px; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h3>Douyin DL (test)</h3>
+  <textarea id="input" placeholder="Dán link hoặc đoạn text share từ Douyin"></textarea>
+  <div class="row">
+    <button id="paste">Dán</button>
+    <button id="go">Lấy link</button>
+  </div>
+  <div id="out"></div>
+  <pre id="raw"></pre>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    $('paste').onclick = async () => {
+      try { $('input').value = await navigator.clipboard.readText(); } catch { alert('Không đọc được clipboard'); }
+    };
+
+    $('go').onclick = async () => {
+      $('out').textContent = 'Đang xử lý...';
+      $('raw').textContent = '';
+      try {
+        const r = await fetch('/api/resolve?url=' + encodeURIComponent($('input').value));
+        const data = await r.json();
+        $('raw').textContent = JSON.stringify(data, null, 2);
+        $('out').innerHTML = '';
+        if (data.ok) {
+          const a = document.createElement('a');
+          a.className = 'dl';
+          a.href = data.play_url;
+          a.target = '_blank';
+          a.rel = 'noreferrer';
+          a.textContent = 'Mở video (' + data.video_id + ')';
+          $('out').appendChild(a);
+        } else {
+          $('out').textContent = 'Lỗi: ' + data.error;
+        }
+      } catch (e) {
+        $('out').textContent = 'Lỗi: ' + e.message;
+      }
+    };
+  </script>
+</body>
+</html>

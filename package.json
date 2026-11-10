@@ -1,0 +1,8 @@
+{
+  "name": "douyin-dl",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}
