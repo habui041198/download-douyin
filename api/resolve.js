@@ -19,7 +19,19 @@ const isAllowed = (u) => {
 
 const VIDEO_ID_RE = /^v\d[a-z0-9]{20,}$/;
 
+// Constant-time string compare
+function safeEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 export default async function handler(req, res) {
+  if (!safeEqual(String(req.query.key || ''), process.env.ACCESS_KEY || '')) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
   const debug = [];
   const input = String(req.query.url || '');
   const link = input.match(/https?:\/\/[^\s]+/)?.[0];
