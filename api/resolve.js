@@ -28,11 +28,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    const awemeId = await resolveAwemeId(link, debug);
-    if (!awemeId) return res.status(200).json({ ok: false, error: 'aweme_id not found', debug });
+    const resolved = await resolveAwemeId(link, debug);
+    if (!resolved) return res.status(200).json({ ok: false, error: 'aweme_id not found', debug });
+    const { awemeId, url: shareUrl } = resolved;
 
+    const ttwid = await getTtwid(debug);
     const result =
-      (await trySharePage(awemeId, debug)) || (await tryDetailApi(awemeId, debug));
+      (await trySharePage(`https://www.iesdouyin.com/share/video/${awemeId}/`, null, 'share_page', debug)) ||
+      (isAllowed(shareUrl) && (await trySharePage(shareUrl, ttwid, 'share_page_full', debug))) ||
+      (await tryDetailApi(awemeId, ttwid, debug));
 
     if (!result) return res.status(200).json({ ok: false, aweme_id: awemeId, error: 'video_id not found', debug });
 
@@ -55,7 +59,7 @@ async function resolveAwemeId(link, debug) {
     const id = url.match(/\/(?:video|note)\/(\d+)/)?.[1] || url.match(/modal_id=(\d+)/)?.[1];
     if (id) {
       debug.push({ step: 'resolve', url });
-      return id;
+      return { awemeId: id, url };
     }
     const r = await fetch(url, {
       redirect: 'manual',
@@ -72,31 +76,39 @@ async function resolveAwemeId(link, debug) {
 }
 
 // Strategy 1: SSR share page (window._ROUTER_DATA)
-async function trySharePage(awemeId, debug) {
-  const r = await fetch(`https://www.iesdouyin.com/share/video/${awemeId}/`, {
-    headers: { 'User-Agent': UA_MOBILE, Referer: 'https://www.douyin.com/' },
+async function trySharePage(url, ttwid, step, debug) {
+  const r = await fetch(url, {
+    headers: {
+      'User-Agent': UA_MOBILE,
+      Referer: 'https://www.douyin.com/',
+      ...(ttwid ? { Cookie: `ttwid=${ttwid}` } : {}),
+    },
     signal: AbortSignal.timeout(8000),
   });
   const html = await r.text();
-  const entry = { step: 'share_page', status: r.status, length: html.length, captcha: /captcha/i.test(html) };
+  const entry = { step, status: r.status, length: html.length };
   debug.push(entry);
 
   const json = html.match(/window\._ROUTER_DATA\s*=\s*(\{[\s\S]*?\})\s*<\/script>/)?.[1];
+  entry.hasRouterData = !!json;
   if (json) {
     try {
-      const found = findVideo(JSON.parse(json));
-      if (found) return { source: 'share_page', ...found };
+      const data = JSON.parse(json);
+      // List page keys to see whether videoInfoRes is present
+      const page = Object.values(data.loaderData || {}).find((v) => v && typeof v === 'object');
+      entry.pageKeys = page ? Object.keys(page) : [];
+      const found = findVideo(data);
+      if (found) return { source: step, ...found };
     } catch (e) {
       entry.parseError = String(e.message);
     }
   }
   const uri = html.match(/"uri"\s*:\s*"(v\d[a-z0-9]{20,})"/)?.[1];
-  return uri ? { source: 'share_page_regex', video_id: uri } : null;
+  return uri ? { source: step + '_regex', video_id: uri } : null;
 }
 
 // Strategy 2: web detail API with an anonymous ttwid cookie (no a_bogus yet)
-async function tryDetailApi(awemeId, debug) {
-  const ttwid = await getTtwid(debug);
+async function tryDetailApi(awemeId, ttwid, debug) {
   const api =
     'https://www.douyin.com/aweme/v1/web/aweme/detail/?device_platform=webapp&aid=6383&channel=channel_pc_web' +
     `&aweme_id=${awemeId}`;
