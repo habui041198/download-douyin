@@ -1,4 +1,4 @@
-// GET /api/download?key=<ACCESS_KEY>&url=<douyin share link or share text>[&proxy=1]
+// GET /api/download?key=<ACCESS_KEY>&url=<douyin share link or share text>[&q=540p|720p|1080p][&proxy=1]
 // Default: 302 redirect to the Douyin play URL (no Vercel bandwidth).
 // proxy=1: stream the video through Vercel as an attachment (fallback).
 
@@ -21,7 +21,16 @@ const isAllowed = (u) => {
 };
 
 const VIDEO_ID_RE = /^v\d[a-z0-9]{20,}$/;
-const timeout = () => AbortSignal.timeout(8000);
+// Fallback order after 'default', highest first
+const QUALITIES = ['1080p', '720p', '540p'];
+
+// Endpoints come from env only
+const PLAY_URL = process.env.DOUYIN_PLAY_URL;
+const DETAIL_API = process.env.DOUYIN_DETAIL_API;
+const TTWID_API = process.env.TTWID_API;
+const REQUEST_TIMEOUT_MS = 5000;
+const TOTAL_BUDGET_MS = 12000;
+
 const text = (msg, status) => new Response(msg, { status, headers: { 'Content-Type': 'text/plain' } });
 
 // Constant-time string compare
@@ -33,34 +42,91 @@ function safeEqual(a, b) {
 }
 
 export default async function handler(request) {
+  const started = Date.now();
   const params = new URL(request.url).searchParams;
   if (!safeEqual(params.get('key') || '', process.env.ACCESS_KEY || '')) return text('Unauthorized', 401);
+  if (!PLAY_URL || !DETAIL_API || !TTWID_API) return text('Server misconfigured', 500);
 
   const link = (params.get('url') || '').match(/https?:\/\/[^\s]+/)?.[0];
   if (!link || !isAllowed(link)) return text('Invalid link', 400);
 
+  // Per-request timeout, capped by what is left of the total budget
+  const timeout = () => {
+    const left = TOTAL_BUDGET_MS - (Date.now() - started);
+    if (left <= 0) throw new Error('Timed out');
+    return AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, left));
+  };
+
+  let source = null;
+  let ratio = null;
+  let error = null;
   try {
-    const resolved = await resolveAwemeId(link);
-    if (!resolved) return text('aweme_id not found', 404);
+    // Resolve the share link and fetch ttwid in parallel
+    const [resolved, ttwid] = await Promise.all([resolveAwemeId(link, timeout), getTtwid(timeout)]);
+    if (!resolved) {
+      error = 'aweme_id not found';
+      return text(error, 404);
+    }
 
-    const ttwid = await getTtwid();
-    const videoId =
-      (await fromSharePage(`https://www.iesdouyin.com/share/video/${resolved.awemeId}/`, null)) ||
-      (isAllowed(resolved.url) && (await fromSharePage(resolved.url, ttwid))) ||
-      (await fromDetailApi(resolved.awemeId, ttwid));
-    if (!videoId) return text('video_id not found', 404);
+    let videoId = null;
+    if (isAllowed(resolved.url)) {
+      videoId = await fromSharePage(resolved.url, ttwid, timeout);
+      if (videoId) source = 'share_page_full';
+    }
+    if (!videoId) {
+      videoId = await fromDetailApi(resolved.awemeId, ttwid, timeout);
+      if (videoId) source = 'detail_api';
+    }
+    if (!videoId) {
+      error = 'video_id not found';
+      return text(error, 404);
+    }
 
-    const playUrl = `https://aweme.snssdk.com/aweme/v1/play/?video_id=${videoId}&improve_bitrate=1&ratio=default`;
+    // Explicit q: use it as is. Otherwise try 'default' (best), then fall back high to low.
+    const q = params.get('q');
+    const candidates = QUALITIES.includes(q) ? [q] : ['default', ...QUALITIES];
+    let playUrl = null;
+    for (const r of candidates) {
+      const url = `${PLAY_URL}?video_id=${videoId}&improve_bitrate=1&ratio=${r}`;
+      if (candidates.length === 1 || (await isPlayable(url, timeout))) {
+        playUrl = url;
+        ratio = r;
+        break;
+      }
+    }
+    if (!playUrl) {
+      error = 'no playable quality';
+      return text(error, 404);
+    }
     if (params.get('proxy') !== '1') return Response.redirect(playUrl, 302);
 
     return await streamVideo(playUrl, videoId);
   } catch (e) {
-    return text(String(e?.message || e), 500);
+    error = String(e?.message || e);
+    return text(error, 500);
+  } finally {
+    // Never log the key or the share link
+    console.log(JSON.stringify({ resolve_ms: Date.now() - started, source, ratio, error }));
+  }
+}
+
+// Check a play URL without downloading the video: expect a redirect to the CDN
+async function isPlayable(url, timeout) {
+  try {
+    const r = await fetch(url, {
+      redirect: 'manual',
+      headers: { 'User-Agent': UA_MOBILE, Referer: 'https://www.douyin.com/' },
+      signal: timeout(),
+    });
+    r.body?.cancel();
+    return (r.status >= 300 && r.status < 400 && !!r.headers.get('location')) || r.ok;
+  } catch {
+    return false;
   }
 }
 
 // Follow redirects manually until a URL containing the aweme_id appears
-async function resolveAwemeId(link) {
+async function resolveAwemeId(link, timeout) {
   let url = link;
   for (let i = 0; i < 5; i++) {
     const id = url.match(/\/(?:video|note)\/(\d+)/)?.[1] || url.match(/modal_id=(\d+)/)?.[1];
@@ -74,7 +140,7 @@ async function resolveAwemeId(link) {
   return null;
 }
 
-async function fromSharePage(url, ttwid) {
+async function fromSharePage(url, ttwid, timeout) {
   const r = await fetch(url, {
     headers: {
       'User-Agent': UA_MOBILE,
@@ -94,10 +160,8 @@ async function fromSharePage(url, ttwid) {
   return html.match(/"uri"\s*:\s*"(v\d[a-z0-9]{20,})"/)?.[1] || null;
 }
 
-async function fromDetailApi(awemeId, ttwid) {
-  const api =
-    'https://www.douyin.com/aweme/v1/web/aweme/detail/?device_platform=webapp&aid=6383&channel=channel_pc_web' +
-    `&aweme_id=${awemeId}`;
+async function fromDetailApi(awemeId, ttwid, timeout) {
+  const api = `${DETAIL_API}?device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=${awemeId}`;
   const r = await fetch(api, {
     headers: {
       'User-Agent': UA_PC,
@@ -114,9 +178,9 @@ async function fromDetailApi(awemeId, ttwid) {
   }
 }
 
-async function getTtwid() {
+async function getTtwid(timeout) {
   try {
-    const r = await fetch('https://ttwid.bytedance.com/ttwid/union/register/', {
+    const r = await fetch(TTWID_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': UA_PC },
       body: JSON.stringify({

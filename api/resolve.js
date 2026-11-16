@@ -19,6 +19,11 @@ const isAllowed = (u) => {
 
 const VIDEO_ID_RE = /^v\d[a-z0-9]{20,}$/;
 
+// Endpoints come from env only
+const PLAY_URL = process.env.DOUYIN_PLAY_URL;
+const DETAIL_API = process.env.DOUYIN_DETAIL_API;
+const TTWID_API = process.env.TTWID_API;
+
 // Constant-time string compare
 function safeEqual(a, b) {
   if (!a || !b || a.length !== b.length) return false;
@@ -30,6 +35,9 @@ function safeEqual(a, b) {
 export default async function handler(req, res) {
   if (!safeEqual(String(req.query.key || ''), process.env.ACCESS_KEY || '')) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+  if (!PLAY_URL || !DETAIL_API || !TTWID_API) {
+    return res.status(500).json({ ok: false, error: 'Server misconfigured' });
   }
 
   const debug = [];
@@ -56,7 +64,7 @@ export default async function handler(req, res) {
       ok: true,
       aweme_id: awemeId,
       ...result,
-      play_url: `https://aweme.snssdk.com/aweme/v1/play/?video_id=${result.video_id}&improve_bitrate=1&ratio=default`,
+      play_url: `${PLAY_URL}?video_id=${result.video_id}&improve_bitrate=1&ratio=default`,
       debug,
     });
   } catch (e) {
@@ -121,9 +129,7 @@ async function trySharePage(url, ttwid, step, debug) {
 
 // Strategy 2: web detail API with an anonymous ttwid cookie (no a_bogus yet)
 async function tryDetailApi(awemeId, ttwid, debug) {
-  const api =
-    'https://www.douyin.com/aweme/v1/web/aweme/detail/?device_platform=webapp&aid=6383&channel=channel_pc_web' +
-    `&aweme_id=${awemeId}`;
+  const api = `${DETAIL_API}?device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=${awemeId}`;
   const r = await fetch(api, {
     headers: {
       'User-Agent': UA_PC,
@@ -149,7 +155,7 @@ async function tryDetailApi(awemeId, ttwid, debug) {
 
 async function getTtwid(debug) {
   try {
-    const r = await fetch('https://ttwid.bytedance.com/ttwid/union/register/', {
+    const r = await fetch(TTWID_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': UA_PC },
       body: JSON.stringify({
