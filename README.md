@@ -16,5 +16,7 @@ Personal endpoint for an iOS Shortcut: paste a Douyin share link, get the video.
   `&q=540p|720p|1080p` forces one quality (no fallback).
 
 Required env vars: `ACCESS_KEY`, `DOUYIN_PLAY_URL`, `DOUYIN_DETAIL_API`, `TTWID_API`.
+
+Optional: `LOG_WEBHOOK_URL`, `LOG_WEBHOOK_SECRET` to append logs to Google Sheets (see `tools/sheets-logger.gs`).
 - `&proxy=1`: stream through Vercel as an attachment (uses Vercel bandwidth).
 - Errors return plain text: 401 wrong key, 400 invalid link, 404 not found.

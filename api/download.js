@@ -28,6 +28,9 @@ const QUALITIES = ['1080p', '720p', '540p'];
 const PLAY_URL = process.env.DOUYIN_PLAY_URL;
 const DETAIL_API = process.env.DOUYIN_DETAIL_API;
 const TTWID_API = process.env.TTWID_API;
+// Optional: Google Sheets webhook for persistent logs
+const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL;
+const LOG_WEBHOOK_SECRET = process.env.LOG_WEBHOOK_SECRET;
 const REQUEST_TIMEOUT_MS = 5000;
 const TOTAL_BUDGET_MS = 12000;
 
@@ -41,10 +44,28 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
-export default async function handler(request) {
+// Log to Vercel console and, if configured, to the Sheets webhook without delaying the response
+async function logEvent(context, data) {
+  console.log(JSON.stringify(data));
+  if (!LOG_WEBHOOK_URL) return;
+  const p = fetch(LOG_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ secret: LOG_WEBHOOK_SECRET, ...data }),
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {});
+  if (context?.waitUntil) context.waitUntil(p);
+  else await p;
+}
+
+export default async function handler(request, context) {
   const started = Date.now();
   const params = new URL(request.url).searchParams;
-  if (!safeEqual(params.get('key') || '', process.env.ACCESS_KEY || '')) return text('Unauthorized', 401);
+  const ip = request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0].trim() || null;
+  if (!safeEqual(params.get('key') || '', process.env.ACCESS_KEY || '')) {
+    await logEvent(context, { event: 'unauthorized', ip });
+    return text('Unauthorized', 401);
+  }
   if (!PLAY_URL || !DETAIL_API || !TTWID_API) return text('Server misconfigured', 500);
 
   const link = (params.get('url') || '').match(/https?:\/\/[^\s]+/)?.[0];
@@ -60,6 +81,8 @@ export default async function handler(request) {
   let source = null;
   let ratio = null;
   let error = null;
+  let awemeId = null;
+  let videoId = null;
   try {
     // Resolve the share link and fetch ttwid in parallel
     const [resolved, ttwid] = await Promise.all([resolveAwemeId(link, timeout), getTtwid(timeout)]);
@@ -67,8 +90,8 @@ export default async function handler(request) {
       error = 'aweme_id not found';
       return text(error, 404);
     }
+    awemeId = resolved.awemeId;
 
-    let videoId = null;
     if (isAllowed(resolved.url)) {
       videoId = await fromSharePage(resolved.url, ttwid, timeout);
       if (videoId) source = 'share_page_full';
@@ -105,8 +128,18 @@ export default async function handler(request) {
     error = String(e?.message || e);
     return text(error, 500);
   } finally {
-    // Never log the key or the share link
-    console.log(JSON.stringify({ resolve_ms: Date.now() - started, source, ratio, error }));
+    // Never log the key
+    await logEvent(context, {
+      event: 'download',
+      ip,
+      link,
+      video_page: awemeId ? `https://www.douyin.com/video/${awemeId}` : null,
+      video_id: videoId,
+      resolve_ms: Date.now() - started,
+      source,
+      ratio,
+      error,
+    });
   }
 }
 
