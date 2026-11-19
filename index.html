@@ -44,7 +44,21 @@
         const data = await r.json();
         $('raw').textContent = JSON.stringify(data, null, 2);
         $('out').innerHTML = '';
-        if (data.ok) {
+        if (data.ok && data.type === 'images') {
+          const link = (href, label) => {
+            const a = document.createElement('a');
+            a.className = 'dl';
+            a.href = href;
+            a.target = '_blank';
+            a.rel = 'noreferrer';
+            a.textContent = label;
+            return a;
+          };
+          data.images.forEach((img, i) => {
+            if (img.image) $('out').appendChild(link(img.image, 'Ảnh ' + (i + 1)));
+            if (img.live) $('out').appendChild(link(img.live, 'Live ' + (i + 1)));
+          });
+        } else if (data.ok) {
           const a = document.createElement('a');
           a.className = 'dl';
           a.href = data.play_url;

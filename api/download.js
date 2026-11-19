@@ -78,6 +78,10 @@ export default async function handler(request, context) {
     return AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, left));
   };
 
+  // format=list: JSON { type, count, items } for both video and image posts
+  const asList = params.get('format') === 'list';
+  let type = null;
+  let count = null;
   let source = null;
   let ratio = null;
   let error = null;
@@ -96,6 +100,41 @@ export default async function handler(request, context) {
       videoId = await fromSharePage(resolved.url, ttwid, timeout);
       if (videoId) source = 'share_page_full';
     }
+
+    // Image posts (/share/slides/) are not server-rendered; /share/video/<id>/ with the same query is
+    let images = null;
+    if (!videoId) {
+      const u = new URL(resolved.url);
+      const videoPage = `${u.origin}/share/video/${awemeId}/${u.search}`;
+      if (videoPage !== resolved.url && isAllowed(videoPage)) {
+        const data = await fetchRouterData(videoPage, ttwid, timeout);
+        const item = findItem(data, awemeId);
+        if (item?.images?.length) images = item.images.filter(Boolean);
+        else videoId = findVideoId(item || data);
+        if (images || videoId) source = 'share_page_video';
+      }
+    }
+    if (images) {
+      type = 'images';
+      if (!asList) {
+        error = 'image post: use format=list';
+        return text(error, 400);
+      }
+      // One /api/media URL per image, plus one per live clip
+      const origin = publicOrigin(request);
+      const key = params.get('key');
+      const items = [];
+      images.forEach((img, i) => {
+        const n = String(i + 1).padStart(2, '0');
+        const imageUrls = imageCandidates(img.url_list);
+        const clipUrls = img.video?.play_addr?.url_list || [];
+        if (imageUrls.length) items.push(mediaUrl(origin, key, imageUrls, `douyin_${awemeId}_${n}`));
+        if (clipUrls.length) items.push(mediaUrl(origin, key, clipUrls, `douyin_${awemeId}_${n}_live`));
+      });
+      count = items.length;
+      return Response.json({ type, count, items });
+    }
+
     if (!videoId) {
       videoId = await fromDetailApi(resolved.awemeId, ttwid, timeout);
       if (videoId) source = 'detail_api';
@@ -121,6 +160,9 @@ export default async function handler(request, context) {
       error = 'no playable quality';
       return text(error, 404);
     }
+    type = 'video';
+    count = 1;
+    if (asList) return Response.json({ type, count, items: [playUrl] });
     if (params.get('proxy') !== '1') return Response.redirect(playUrl, 302);
 
     return await streamVideo(playUrl, videoId);
@@ -134,6 +176,8 @@ export default async function handler(request, context) {
       ip,
       link,
       video_page: awemeId ? `https://www.douyin.com/video/${awemeId}` : null,
+      type,
+      count,
       video_id: videoId,
       resolve_ms: Date.now() - started,
       source,
@@ -141,6 +185,65 @@ export default async function handler(request, context) {
       error,
     });
   }
+}
+
+// Public origin for item URLs (PUBLIC_ORIGIN overrides, e.g. behind a tunnel that rewrites Host)
+function publicOrigin(request) {
+  if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/$/, '');
+  const u = new URL(request.url);
+  const proto = request.headers.get('x-forwarded-proto')?.split(',')[0].trim() || u.protocol.replace(':', '');
+  return `${proto}://${u.host}`;
+}
+
+function mediaUrl(origin, key, urls, name) {
+  const p = new URLSearchParams({ key, name });
+  for (const u of urls.slice(0, 8)) p.append('u', u);
+  return `${origin}/api/media?${p}`;
+}
+
+// JPEG first, then the same JPEG path on the other CDN hosts, then the remaining (WebP) URLs
+function imageCandidates(urls) {
+  if (!Array.isArray(urls) || !urls.length) return [];
+  const jpegs = urls.filter((u) => /\.jpe?g(\?|$)/i.test(u));
+  const hosts = [...new Set(urls.map((u) => new URL(u).host))];
+  const swapped = jpegs.flatMap((u) =>
+    hosts.map((h) => {
+      const x = new URL(u);
+      x.host = h;
+      return x.href;
+    })
+  );
+  return [...new Set([...jpegs, ...swapped, ...urls])];
+}
+
+// Parsed window._ROUTER_DATA of a share page, or null
+async function fetchRouterData(url, ttwid, timeout) {
+  const r = await fetch(url, {
+    headers: {
+      'User-Agent': UA_MOBILE,
+      Referer: 'https://www.douyin.com/',
+      ...(ttwid ? { Cookie: `ttwid=${ttwid}` } : {}),
+    },
+    signal: timeout(),
+  });
+  const json = (await r.text()).match(/window\._ROUTER_DATA\s*=\s*(\{[\s\S]*?\})\s*<\/script>/)?.[1];
+  try {
+    return json ? JSON.parse(json) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Find the post object (has aweme_id and either images or video)
+function findItem(node, id) {
+  const stack = [node];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (String(cur.aweme_id) === id && (cur.images || cur.video)) return cur;
+    for (const v of Object.values(cur)) if (v && typeof v === 'object') stack.push(v);
+  }
+  return null;
 }
 
 // Check a play URL without downloading the video: expect a redirect to the CDN
@@ -162,7 +265,7 @@ async function isPlayable(url, timeout) {
 async function resolveAwemeId(link, timeout) {
   let url = link;
   for (let i = 0; i < 5; i++) {
-    const id = url.match(/\/(?:video|note)\/(\d+)/)?.[1] || url.match(/modal_id=(\d+)/)?.[1];
+    const id = url.match(/\/(?:video|note|slides)\/(\d+)/)?.[1] || url.match(/modal_id=(\d+)/)?.[1];
     if (id) return { awemeId: id, url };
     const r = await fetch(url, { redirect: 'manual', headers: { 'User-Agent': UA_MOBILE }, signal: timeout() });
     const next = r.headers.get('location');
